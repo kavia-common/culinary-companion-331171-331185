@@ -5,6 +5,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.core.config import Settings, get_settings
+from src.api.core.errors import install_error_handlers
+from src.api.core.request_id import install_request_id_middleware
 from src.api.db.database import init_db, session_scope
 from src.api.db.init import ensure_schema_and_seed
 from src.api.routes import admin, auth, favorites, my_recipes, recipes, reviews, shopping_list
@@ -28,21 +30,43 @@ app = FastAPI(
         "Backend REST API for the Culinary Companion app.\n\n"
         "Auth: Use `Authorization: Bearer <accessToken>` for protected endpoints.\n"
         "Roles: `user`, `moderator`, `admin`.\n"
-        "Moderation: New reviews are created as `pending` and must be approved by an admin/moderator."
+        "Moderation: New reviews are created as `pending` and must be approved by an admin/moderator.\n\n"
+        "Error shape:\n"
+        "  {\"error\": {\"message\": str, \"code\": str, \"details\": any, \"requestId\": str|null}}\n"
+        "Request tracing:\n"
+        "  Every response includes an `x-request-id` header."
     ),
     version="1.0.0",
     openapi_tags=openapi_tags,
 )
 
+# Install cross-cutting concerns early so every route is covered.
+install_request_id_middleware(app)
+install_error_handlers(app)
+
 
 def _configure_cors(settings: Settings) -> None:
+    """
+    Configure CORS for browser-based clients.
+
+    Important invariant:
+      - If allow_credentials=True, allow_origins cannot be ["*"].
+        Browsers will reject credentialed CORS responses with wildcard origin.
+    """
     allow_origins = settings.cors_allow_origins
+    allow_credentials = True
+
+    # Make wildcard safe by disabling credentials in that case.
+    if "*" in allow_origins:
+        allow_credentials = False
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allow_origins,
-        allow_credentials=True,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["x-request-id"],
     )
 
 

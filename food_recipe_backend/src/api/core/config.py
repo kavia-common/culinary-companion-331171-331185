@@ -1,4 +1,5 @@
 import os
+import secrets
 from dataclasses import dataclass
 from typing import List
 
@@ -21,39 +22,64 @@ class Settings:
     cors_allow_origins: List[str]
 
 
+def _env_first(*names: str) -> str | None:
+    """Return the first non-empty environment variable from the provided names."""
+    for name in names:
+        val = os.getenv(name)
+        if val is not None and str(val).strip() != "":
+            return val
+    return None
+
+
 # PUBLIC_INTERFACE
 def get_settings() -> Settings:
     """Load and validate application settings from environment variables.
 
-    Required:
-      - JWT_SECRET
+    Notes for Kavia preview:
+      - The preview runtime often injects `NEXT_PUBLIC_*` variables (shared with the frontend)
+        rather than backend-specific ones. We accept those as fallbacks to avoid startup crashes.
+
+    Preferred variables:
+      - JWT_SECRET (preferred). If missing, we will fall back to NEXT_PUBLIC_* equivalents.
+        If still missing, we generate a temporary random secret in non-production environments
+        to allow the service to boot in preview/dev. Production deployments should always set
+        JWT_SECRET explicitly.
 
     Optional:
       - JWT_ALGORITHM (default: HS256)
       - JWT_ACCESS_TOKEN_EXPIRES_MINUTES (default: 10080)
       - DATABASE_URL (default: sqlite:///./data/app.db)
-      - CORS_ALLOW_ORIGINS (default: "*")
+      - CORS_ALLOW_ORIGINS (default: "*", or falls back to ALLOWED_ORIGINS)
 
     Returns:
       Settings: parsed settings.
 
     Raises:
-      ValueError: if JWT_ACCESS_TOKEN_EXPIRES_MINUTES is not an integer, or JWT_SECRET missing.
+      ValueError: if JWT_ACCESS_TOKEN_EXPIRES_MINUTES is not an integer.
     """
-    jwt_secret = os.getenv("JWT_SECRET")
-    if not jwt_secret:
-        raise ValueError("JWT_SECRET is required (set it in the environment).")
+    node_env = (os.getenv("NODE_ENV") or os.getenv("NEXT_PUBLIC_NODE_ENV") or "").strip().lower()
 
-    jwt_algorithm = os.getenv("JWT_ALGORITHM", "HS256")
-    expires_raw = os.getenv("JWT_ACCESS_TOKEN_EXPIRES_MINUTES", "10080")
+    jwt_secret = _env_first("JWT_SECRET", "NEXT_PUBLIC_JWT_SECRET")
+    if not jwt_secret:
+        # Allow preview/dev to boot even when JWT_SECRET isn't wired.
+        # This secret is process-local and will change on restart.
+        if node_env in {"production", "prod"}:
+            raise ValueError("JWT_SECRET is required (set it in the environment).")
+        jwt_secret = secrets.token_urlsafe(48)
+
+    jwt_algorithm = _env_first("JWT_ALGORITHM", "NEXT_PUBLIC_JWT_ALGORITHM") or "HS256"
+    expires_raw = _env_first(
+        "JWT_ACCESS_TOKEN_EXPIRES_MINUTES",
+        "NEXT_PUBLIC_JWT_ACCESS_TOKEN_EXPIRES_MINUTES",
+    ) or "10080"
     try:
         expires_minutes = int(expires_raw)
     except ValueError as exc:
         raise ValueError("JWT_ACCESS_TOKEN_EXPIRES_MINUTES must be an integer.") from exc
 
-    database_url = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
+    database_url = _env_first("DATABASE_URL", "NEXT_PUBLIC_DATABASE_URL") or "sqlite:///./data/app.db"
 
-    cors_raw = os.getenv("CORS_ALLOW_ORIGINS", "*").strip()
+    cors_raw = (_env_first("CORS_ALLOW_ORIGINS", "ALLOWED_ORIGINS", "NEXT_PUBLIC_CORS_ALLOW_ORIGINS") or "*").strip()
     if cors_raw == "*":
         cors_allow_origins = ["*"]
     else:

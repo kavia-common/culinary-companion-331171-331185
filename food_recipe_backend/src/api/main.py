@@ -24,6 +24,33 @@ openapi_tags: List[dict] = [
     {"name": "admin", "description": "Admin/moderation endpoints (roles enforced)."},
 ]
 
+
+def _cors_middleware_params(settings: Settings) -> dict:
+    """Compute CORSMiddleware parameters from settings.
+
+    Contract:
+      - Inputs: Settings with `cors_allow_origins`
+      - Outputs: dict of kwargs for CORSMiddleware
+      - Invariants:
+          - If allow_origins contains "*", then allow_credentials is forced False
+            (credentialed CORS responses cannot use wildcard origin).
+    """
+    allow_origins = settings.cors_allow_origins
+    allow_credentials = True
+
+    # Make wildcard safe by disabling credentials in that case.
+    if "*" in allow_origins:
+        allow_credentials = False
+
+    return {
+        "allow_origins": allow_origins,
+        "allow_credentials": allow_credentials,
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+        "expose_headers": ["x-request-id"],
+    }
+
+
 app = FastAPI(
     title="Culinary Companion API",
     description=(
@@ -44,37 +71,18 @@ app = FastAPI(
 install_request_id_middleware(app)
 install_error_handlers(app)
 
-
-def _configure_cors(settings: Settings) -> None:
-    """
-    Configure CORS for browser-based clients.
-
-    Important invariant:
-      - If allow_credentials=True, allow_origins cannot be ["*"].
-        Browsers will reject credentialed CORS responses with wildcard origin.
-    """
-    allow_origins = settings.cors_allow_origins
-    allow_credentials = True
-
-    # Make wildcard safe by disabling credentials in that case.
-    if "*" in allow_origins:
-        allow_credentials = False
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allow_origins,
-        allow_credentials=allow_credentials,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["x-request-id"],
-    )
+# CORS middleware must be installed before the app starts serving.
+# Installing middleware in a startup event causes:
+#   RuntimeError: Cannot add middleware after an application has started
+# which prevents the server from becoming ready in preview.
+_settings_for_middleware = get_settings()
+app.add_middleware(CORSMiddleware, **_cors_middleware_params(_settings_for_middleware))
 
 
 @app.on_event("startup")
 def _startup():
-    """Initialize settings, database connection, schema, and seed data on startup."""
+    """Initialize database connection, schema, and seed data on startup."""
     settings = get_settings()
-    _configure_cors(settings)
     init_db(settings)
 
     # Create schema + seed admin if DB is empty
